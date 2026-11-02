@@ -2,13 +2,18 @@ package it.dino.switchextractor;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
+import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.view.View;
 import android.view.WindowManager;
@@ -21,28 +26,29 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
 
-    private interface PathCallback {
-        void picked(File f);
-    }
+    private static final int REQ_KEYS = 1;
+    private static final int REQ_GAME = 2;
+    private static final int REQ_OUT = 3;
 
     private static final String DEFAULT_OUT = "/storage/emulated/0/SwitchExtract";
 
     private SharedPreferences prefs;
     private File keysFile;
-    private File inputFile;
+
+    // Gioco scelto
+    private Uri gameUri;
+    private String gameName;
+    private long gameSize;
+
     private Extractor extractor;
     private Thread worker;
     private PowerManager.WakeLock wakeLock;
@@ -107,15 +113,7 @@ public class MainActivity extends Activity {
         btnKeys.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (!ensureAccess()) {
-                    return;
-                }
-                browse(startDir(), false, new String[]{""}, new PathCallback() {
-                    @Override
-                    public void picked(File f) {
-                        importKeys(f);
-                    }
-                });
+                pickFile(REQ_KEYS);
             }
         });
         root.addView(btnKeys);
@@ -129,17 +127,7 @@ public class MainActivity extends Activity {
         btnGame.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (!ensureAccess()) {
-                    return;
-                }
-                browse(startDir(), false, new String[]{".xci", ".nsp"}, new PathCallback() {
-                    @Override
-                    public void picked(File f) {
-                        inputFile = f;
-                        prefs.edit().putString("lastDir", f.getParent()).apply();
-                        tvGame.setText(f.getName() + "  (" + Extractor.human(f.length()) + ")");
-                    }
-                });
+                pickFile(REQ_GAME);
             }
         });
         root.addView(btnGame);
@@ -150,19 +138,13 @@ public class MainActivity extends Activity {
         etOut.setText(prefs.getString("outBase", DEFAULT_OUT));
         root.addView(etOut);
         Button btnOut = new Button(this);
-        btnOut.setText("Sfoglia cartella");
+        btnOut.setText("Scegli cartella");
         btnOut.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (!ensureAccess()) {
-                    return;
-                }
-                browse(startDir(), true, null, new PathCallback() {
-                    @Override
-                    public void picked(File f) {
-                        etOut.setText(f.getAbsolutePath());
-                    }
-                });
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                launch(i, REQ_OUT);
             }
         });
         root.addView(btnOut);
@@ -245,7 +227,8 @@ public class MainActivity extends Activity {
 
     private void refreshStatus() {
         boolean ok = Environment.isExternalStorageManager();
-        tvPerm.setText(ok ? "Accesso ai file: concesso" : "Accesso ai file: NON concesso (serve per leggere il gioco e scrivere l'output)");
+        tvPerm.setText(ok ? "Accesso ai file: concesso"
+                : "Accesso ai file: NON concesso (serve per leggere il gioco e scrivere l'output)");
         btnPerm.setVisibility(ok ? View.GONE : View.VISIBLE);
         if (keysFile.isFile() && keysFile.length() > 0) {
             tvKeys.setText("prod.keys caricata: " + prefs.getString("keysName", "ok"));
@@ -266,6 +249,28 @@ public class MainActivity extends Activity {
                 scroll.fullScroll(View.FOCUS_DOWN);
             }
         });
+    }
+
+    /** Errore completo (tipo + messaggio + causa + prime righe di stack) nel log, selezionabile e copiabile. */
+    private void logError(String what, Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("ERRORE: ").append(what).append('\n');
+        Throwable c = t;
+        int depth = 0;
+        while (c != null && depth < 4) {
+            sb.append(depth == 0 ? "  " : "  causa: ").append(c.getClass().getName())
+                    .append(": ").append(String.valueOf(c.getMessage())).append('\n');
+            c = c.getCause();
+            depth++;
+        }
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        String[] lines = sw.toString().split("\n");
+        for (int i = 1; i < lines.length && i <= 6; i++) {
+            sb.append("  ").append(lines[i].trim()).append('\n');
+        }
+        log(sb.toString());
+        toast(what + ": " + t.getClass().getSimpleName() + " (dettagli nel log in basso)");
     }
 
     // ------------------------------------------------------------------
@@ -292,167 +297,204 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------------
-    // Selettore di file / cartelle (nessun Storage Access Framework:
-    // hactool ha bisogno di percorsi veri)
+    // Selettore di sistema (Storage Access Framework)
     // ------------------------------------------------------------------
 
-    private File startDir() {
-        String last = prefs.getString("lastDir", null);
-        if (last != null && new File(last).isDirectory()) {
-            return new File(last);
-        }
-        File dl = new File("/storage/emulated/0/Download");
-        if (dl.isDirectory()) {
-            return dl;
-        }
-        return new File("/storage/emulated/0");
+    private void pickFile(int req) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        launch(i, req);
     }
 
-    private List<File> roots() {
-        List<File> r = new ArrayList<File>();
-        r.add(new File("/storage/emulated/0"));
-        File[] vols = new File("/storage").listFiles();
-        if (vols != null) {
-            for (File v : vols) {
-                if (v.getName().matches("[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}") && v.isDirectory()) {
-                    r.add(v);
-                }
-            }
-        }
-        return r;
-    }
-
-    private boolean isRoot(File d) {
-        for (File r : roots()) {
-            if (r.getAbsolutePath().equals(d.getAbsolutePath())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** dir == null mostra l'elenco delle memorie. exts == null: solo cartelle. */
-    private void browse(final File dir, final boolean dirMode, final String[] exts, final PathCallback cb) {
-        final List<String> labels = new ArrayList<String>();
-        final List<File> targets = new ArrayList<File>();
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-
-        if (dir == null) {
-            b.setTitle("Scegli la memoria");
-            for (File r : roots()) {
-                labels.add("[memoria] " + (r.getAbsolutePath().startsWith("/storage/emulated") ? "Interna" : "Scheda SD " + r.getName()));
-                targets.add(r);
-            }
-        } else {
-            File[] kids = dir.listFiles();
-            if (kids == null) {
-                toast("Cartella non leggibile: " + dir);
-                browse(null, dirMode, exts, cb);
-                return;
-            }
-            b.setTitle(dir.getAbsolutePath());
-            labels.add("[su] ..");
-            targets.add(isRoot(dir) ? null : dir.getParentFile());
-
-            List<File> dirs = new ArrayList<File>();
-            List<File> files = new ArrayList<File>();
-            for (File k : kids) {
-                if (k.getName().startsWith(".")) {
-                    continue;
-                }
-                if (k.isDirectory()) {
-                    dirs.add(k);
-                } else if (!dirMode && matches(k, exts)) {
-                    files.add(k);
-                }
-            }
-            Comparator<File> byName = new Comparator<File>() {
-                @Override
-                public int compare(File a, File c) {
-                    return a.getName().compareToIgnoreCase(c.getName());
-                }
-            };
-            Collections.sort(dirs, byName);
-            Collections.sort(files, byName);
-            for (File d : dirs) {
-                labels.add("[cartella] " + d.getName());
-                targets.add(d);
-            }
-            for (File f : files) {
-                labels.add(f.getName() + "  (" + Extractor.human(f.length()) + ")");
-                targets.add(f);
-            }
-        }
-
-        b.setItems(labels.toArray(new String[0]), new android.content.DialogInterface.OnClickListener() {
-            @Override
-            public void onClick(android.content.DialogInterface d, int which) {
-                File t = targets.get(which);
-                if (t == null) {
-                    browse(null, dirMode, exts, cb);
-                } else if (t.isDirectory()) {
-                    browse(t, dirMode, exts, cb);
-                } else {
-                    cb.picked(t);
-                }
-            }
-        });
-        if (dirMode && dir != null) {
-            b.setPositiveButton("Scegli questa cartella", new android.content.DialogInterface.OnClickListener() {
-                @Override
-                public void onClick(android.content.DialogInterface d, int which) {
-                    cb.picked(dir);
-                }
-            });
-        }
-        b.setNegativeButton("Annulla", null);
-        b.show();
-    }
-
-    private static boolean matches(File f, String[] exts) {
-        if (exts == null) {
-            return false;
-        }
-        String n = f.getName().toLowerCase(Locale.ROOT);
-        for (String e : exts) {
-            if (n.endsWith(e)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // ------------------------------------------------------------------
-    // Chiavi
-    // ------------------------------------------------------------------
-
-    private void importKeys(File src) {
+    private void launch(Intent i, int req) {
         try {
-            if (src.length() > 4 * 1024 * 1024) {
-                toast("Quel file e' troppo grande per essere una prod.keys.");
-                return;
+            startActivityForResult(i, req);
+        } catch (Exception e) {
+            logError("Impossibile aprire il selettore file di sistema", e);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        try {
+            if (requestCode == REQ_KEYS) {
+                importKeys(uri);
+            } else if (requestCode == REQ_GAME) {
+                chooseGame(uri);
+            } else if (requestCode == REQ_OUT) {
+                chooseOutput(uri);
             }
-            InputStream in = new FileInputStream(src);
-            OutputStream out = new FileOutputStream(keysFile);
+        } catch (Exception e) {
+            logError("Selezione file", e);
+        }
+    }
+
+    private String displayName(Uri uri) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && n.length() > 0) {
+                    return n;
+                }
+            }
+        } catch (Exception ignored) {
+            // useremo il nome nell'URI
+        } finally {
+            if (c != null) {
+                c.close();
+            }
+        }
+        String last = uri.getLastPathSegment();
+        if (last == null) {
+            return "file";
+        }
+        int slash = last.lastIndexOf('/');
+        return slash >= 0 ? last.substring(slash + 1) : last;
+    }
+
+    private long size(Uri uri) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null);
+            if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                return c.getLong(0);
+            }
+        } catch (Exception ignored) {
+            // dimensione sconosciuta
+        } finally {
+            if (c != null) {
+                c.close();
+            }
+        }
+        return -1;
+    }
+
+    // ------------------------------------------------------------------
+    // Chiavi: copiate in streaming, nessun percorso e nessun permesso speciale
+    // ------------------------------------------------------------------
+
+    private void importKeys(Uri uri) throws Exception {
+        String name = displayName(uri);
+        long sz = size(uri);
+        if (sz > 4L * 1024 * 1024) {
+            toast("Quel file e' troppo grande per essere una prod.keys (" + Extractor.human(sz) + ").");
+            return;
+        }
+        File tmp = new File(getFilesDir(), "prod.keys.new");
+        InputStream in = getContentResolver().openInputStream(uri);
+        if (in == null) {
+            throw new Exception("Il selettore non ha restituito il contenuto del file");
+        }
+        long total = 0;
+        try {
+            OutputStream out = new FileOutputStream(tmp);
             try {
                 byte[] buf = new byte[8192];
                 int n;
                 while ((n = in.read(buf)) > 0) {
                     out.write(buf, 0, n);
+                    total += n;
+                    if (total > 4L * 1024 * 1024) {
+                        throw new Exception("File troppo grande per essere una prod.keys");
+                    }
                 }
             } finally {
-                in.close();
                 out.close();
             }
-            String content = new String(java.nio.file.Files.readAllBytes(keysFile.toPath()), "UTF-8");
-            if (!content.contains("master_key")) {
-                toast("Attenzione: il file non sembra una prod.keys (manca master_key_xx).");
-            }
-            prefs.edit().putString("keysName", src.getName()).putString("lastDir", src.getParent()).apply();
-            refreshStatus();
-        } catch (Exception e) {
-            toast("Errore nel leggere le chiavi: " + e.getMessage());
+        } finally {
+            in.close();
         }
+        if (total == 0) {
+            tmp.delete();
+            throw new Exception("Il file e' vuoto");
+        }
+        String content = new String(java.nio.file.Files.readAllBytes(tmp.toPath()), "UTF-8");
+        if (!content.contains("master_key")) {
+            log("Attenzione: \"" + name + "\" non sembra una prod.keys (manca master_key_xx). La uso lo stesso.");
+        }
+        if (keysFile.exists() && !keysFile.delete()) {
+            throw new Exception("Impossibile sostituire la prod.keys precedente");
+        }
+        if (!tmp.renameTo(keysFile)) {
+            throw new Exception("Impossibile salvare la prod.keys");
+        }
+        prefs.edit().putString("keysName", name + " (" + total + " byte)").apply();
+        log("prod.keys caricata: " + name + " (" + total + " byte)");
+        refreshStatus();
+    }
+
+    // ------------------------------------------------------------------
+    // Gioco e cartella di output
+    // ------------------------------------------------------------------
+
+    private void chooseGame(Uri uri) {
+        String name = displayName(uri);
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (!lower.endsWith(".xci") && !lower.endsWith(".nsp")) {
+            toast("Serve un file .xci o .nsp (hai scelto \"" + name + "\").");
+            return;
+        }
+        gameUri = uri;
+        gameName = name;
+        gameSize = size(uri);
+        tvGame.setText(name + (gameSize >= 0 ? "  (" + Extractor.human(gameSize) + ")" : ""));
+    }
+
+    private void chooseOutput(Uri tree) {
+        String path = pathFromDocId(DocumentsContract.getTreeDocumentId(tree), tree.getAuthority());
+        if (path == null) {
+            toast("Scegli una cartella dalla memoria interna o dalla scheda SD (non da altre app).");
+            return;
+        }
+        etOut.setText(path);
+    }
+
+    /**
+     * Converte un document id del provider della memoria ("primary:Download/x.xci",
+     * "1234-ABCD:Games") in un percorso vero. null se non e' il provider della memoria.
+     */
+    private static String pathFromDocId(String docId, String authority) {
+        if (docId == null || !"com.android.externalstorage.documents".equals(authority)) {
+            return null;
+        }
+        int colon = docId.indexOf(':');
+        if (colon < 0) {
+            return null;
+        }
+        String vol = docId.substring(0, colon);
+        String rel = docId.substring(colon + 1);
+        String base = "primary".equals(vol) ? "/storage/emulated/0" : "/storage/" + vol;
+        return rel.length() == 0 ? base : base + "/" + rel;
+    }
+
+    /** Percorso reale del gioco scelto, se ricavabile; altrimenti null (si usera' il descrittore di file). */
+    private File resolveGamePath(Uri uri) {
+        try {
+            if (DocumentsContract.isDocumentUri(this, uri)) {
+                String docId = DocumentsContract.getDocumentId(uri);
+                String p = pathFromDocId(docId, uri.getAuthority());
+                if (p == null && docId != null && docId.startsWith("raw:")) {
+                    p = docId.substring(4);
+                }
+                if (p != null) {
+                    File f = new File(p);
+                    if (f.isFile() && f.canRead()) {
+                        return f;
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // si passa al fallback
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -467,7 +509,7 @@ public class MainActivity extends Activity {
             toast("Scegli prima la prod.keys.");
             return;
         }
-        if (inputFile == null) {
+        if (gameUri == null) {
             toast("Scegli prima il gioco (.xci / .nsp).");
             return;
         }
@@ -477,7 +519,7 @@ public class MainActivity extends Activity {
         }
         prefs.edit().putString("outBase", base).apply();
 
-        String name = inputFile.getName();
+        String name = gameName;
         int dot = name.lastIndexOf('.');
         if (dot > 0) {
             name = name.substring(0, dot);
@@ -491,10 +533,10 @@ public class MainActivity extends Activity {
         if (exists) {
             new AlertDialog.Builder(this)
                     .setTitle("Cartelle gia' presenti")
-                    .setMessage("In " + outDir + " esistono gia' romfs/ed exefs/.\nSe continui verranno cancellate e rifatte da zero.")
-                    .setPositiveButton("Sovrascrivi", new android.content.DialogInterface.OnClickListener() {
+                    .setMessage("In " + outDir + " esistono gia' romfs/ ed exefs/.\nSe continui verranno cancellate e rifatte da zero.")
+                    .setPositiveButton("Sovrascrivi", new DialogInterface.OnClickListener() {
                         @Override
-                        public void onClick(android.content.DialogInterface d, int which) {
+                        public void onClick(DialogInterface d, int which) {
                             startRun(outDir, true);
                         }
                     })
@@ -507,12 +549,35 @@ public class MainActivity extends Activity {
 
     private void startRun(final File outDir, final boolean overwrite) {
         final File hactool = new File(getApplicationInfo().nativeLibraryDir, "libhactool.so");
-        final File input = inputFile;
+        final Uri uri = gameUri;
+        final String name = gameName;
         tvLog.setText("");
         tvCount.setText("");
-        log("Gioco:  " + input.getName());
+        log("Gioco:  " + name);
         log("Output: " + outDir);
+
+        // 1) percorso diretto, se ricavabile; 2) altrimenti il descrittore di file aperto da questa app
+        File direct = resolveGamePath(uri);
+        ParcelFileDescriptor pfd = null;
+        final File input;
+        try {
+            if (direct != null) {
+                input = direct;
+                log("Leggo il gioco da: " + direct);
+            } else {
+                pfd = getContentResolver().openFileDescriptor(uri, "r");
+                if (pfd == null) {
+                    throw new Exception("Il selettore non ha restituito il file");
+                }
+                input = new File("/proc/" + android.os.Process.myPid() + "/fd/" + pfd.getFd());
+                log("Percorso non ricavabile: leggo il gioco tramite descrittore di file.");
+            }
+        } catch (Exception e) {
+            logError("Impossibile aprire il gioco", e);
+            return;
+        }
         log("Non chiudere l'app finche' non finisce.");
+        final ParcelFileDescriptor holdPfd = pfd;
 
         extractor = new Extractor(hactool, keysFile, getFilesDir(), new Extractor.Log() {
             @Override
@@ -542,23 +607,34 @@ public class MainActivity extends Activity {
             @Override
             public void run() {
                 Extractor.Result res = null;
-                String err = null;
+                Throwable err = null;
                 try {
-                    res = ex.run(input, outDir, overwrite);
+                    res = ex.run(input, name, outDir, overwrite);
                 } catch (InterruptedException ie) {
-                    err = "Operazione annullata.";
-                } catch (Exception e) {
-                    err = e.getMessage() == null ? e.toString() : e.getMessage();
+                    err = ie;
+                } catch (Throwable e) {
+                    err = e;
+                } finally {
+                    if (holdPfd != null) {
+                        try {
+                            holdPfd.close();
+                        } catch (Exception ignored) {
+                            // niente da fare
+                        }
+                    }
                 }
                 final Extractor.Result fres = res;
-                final String ferr = err;
+                final Throwable ferr = err;
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
                         setRunning(false);
-                        if (ferr != null) {
+                        if (ferr instanceof InterruptedException) {
                             log("");
-                            log("ERRORE: " + ferr);
+                            log("Operazione annullata.");
+                        } else if (ferr != null) {
+                            log("");
+                            logError("Estrazione fallita", ferr);
                         } else {
                             log("");
                             log("FATTO.");

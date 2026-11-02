@@ -77,7 +77,15 @@ public class Extractor {
     // ------------------------------------------------------------------
 
     public Result run(File input, File outDir, boolean overwrite) throws Exception {
-        String lower = input.getName().toLowerCase(Locale.ROOT);
+        return run(input, input.getName(), outDir, overwrite);
+    }
+
+    /**
+     * displayName decide il formato (.xci / .nsp). Serve quando il percorso non ha un'estensione
+     * affidabile (per esempio /proc/PID/fd/N ottenuto dal selettore di sistema).
+     */
+    public Result run(File input, String displayName, File outDir, boolean overwrite) throws Exception {
+        String lower = displayName.toLowerCase(Locale.ROOT);
         boolean xci = lower.endsWith(".xci");
         boolean nsp = lower.endsWith(".nsp");
         if (!xci && !nsp) {
