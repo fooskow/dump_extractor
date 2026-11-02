@@ -331,6 +331,7 @@ public class Extractor {
         cmd.add(hactool.getAbsolutePath());
         cmd.add("-k");
         cmd.add(keys.getAbsolutePath());
+        cmd.add("--disablekeywarns");
         cmd.addAll(extra);
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
@@ -374,10 +375,21 @@ public class Extractor {
     }
 
     private static String tail(List<String> lines, int n) {
+        List<String> real = new ArrayList<String>();
+        for (String l : lines) {
+            if (!l.startsWith("[WARN]")) {
+                real.add(l);
+            }
+        }
+        List<String> use = real.isEmpty() ? lines : real;
         StringBuilder sb = new StringBuilder();
-        int start = Math.max(0, lines.size() - n);
-        for (int i = start; i < lines.size(); i++) {
-            sb.append(lines.get(i)).append('\n');
+        int start = Math.max(0, use.size() - n);
+        for (int i = start; i < use.size(); i++) {
+            String l = use.get(i);
+            if (l.length() > 200) {
+                l = l.substring(0, 200) + "...";
+            }
+            sb.append(l).append('\n');
         }
         return sb.toString().trim();
     }

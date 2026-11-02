@@ -393,32 +393,25 @@ public class MainActivity extends Activity {
         if (in == null) {
             throw new Exception("Il selettore non ha restituito il contenuto del file");
         }
-        long total = 0;
+        KeyFile.Report rep;
         try {
             OutputStream out = new FileOutputStream(tmp);
             try {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) > 0) {
-                    out.write(buf, 0, n);
-                    total += n;
-                    if (total > 4L * 1024 * 1024) {
-                        throw new Exception("File troppo grande per essere una prod.keys");
-                    }
-                }
+                // copia in streaming, tenendo solo le righe valide (vedi KeyFile)
+                rep = KeyFile.sanitize(in, out);
             } finally {
                 out.close();
             }
+        } catch (Exception e) {
+            tmp.delete();
+            throw e;
         } finally {
             in.close();
         }
-        if (total == 0) {
+        if (rep.kept == 0) {
             tmp.delete();
-            throw new Exception("Il file e' vuoto");
-        }
-        String content = new String(java.nio.file.Files.readAllBytes(tmp.toPath()), "UTF-8");
-        if (!content.contains("master_key")) {
-            log("Attenzione: \"" + name + "\" non sembra una prod.keys (manca master_key_xx). La uso lo stesso.");
+            toast("In \"" + name + "\" non c'e' nessuna chiave valida: e' davvero la prod.keys?");
+            return;
         }
         if (keysFile.exists() && !keysFile.delete()) {
             throw new Exception("Impossibile sostituire la prod.keys precedente");
@@ -426,8 +419,18 @@ public class MainActivity extends Activity {
         if (!tmp.renameTo(keysFile)) {
             throw new Exception("Impossibile salvare la prod.keys");
         }
-        prefs.edit().putString("keysName", name + " (" + total + " byte)").apply();
-        log("prod.keys caricata: " + name + " (" + total + " byte)");
+        prefs.edit().putString("keysName", name + " (" + rep.kept + " chiavi)").apply();
+        log("prod.keys caricata: " + name + " (" + rep.kept + " chiavi valide)");
+        if (!rep.hasMasterKey) {
+            log("Attenzione: non trovo nessuna master_key_xx. Questa non sembra una prod.keys completa.");
+        }
+        if (!rep.dropped.isEmpty()) {
+            log("Ho ignorato " + rep.dropped.size() + " riga/e malformata/e (altrimenti hactool si blocca):");
+            for (String d : rep.dropped) {
+                log("  - " + d);
+            }
+            log("Se una di queste e' una chiave che serve davvero, l'estrazione fallira' con un errore chiaro.");
+        }
         refreshStatus();
     }
 

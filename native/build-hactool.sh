@@ -43,6 +43,36 @@ git checkout -q FETCH_HEAD
 grep -q 'nca_ctx.tool_ctx->base_file++;' main.c || { echo "ERRORE: patch bionic non applicabile (main.c cambiato?)" >&2; exit 1; }
 sed -i 's/nca_ctx\.tool_ctx->base_file++;/nca_ctx.tool_ctx->base_file = (FILE *)1;/' main.c
 
+# hactool termina subito (exit) se una chiave che conosce ha la lunghezza sbagliata: nelle prod.keys
+# reali capita (es. una riga con un byte in piu'). Per le chiavi lette da file la ignoriamo (resta a
+# zero) invece di chiudere il programma; da riga di comando (--titlekey) il comportamento non cambia.
+python3 - <<'PYEOF'
+import re, sys
+src = open("extkeys.c").read()
+m = re.search(r"void parse_hex_key\(unsigned char \*key, const char \*hex, unsigned int len\) \{.*?\n\}\n", src, re.S)
+if not m or "parse_hex_key_lenient" in src:
+    sys.exit("ERRORE: patch 'lenient' non applicabile (extkeys.c cambiato?)")
+add = """
+static void parse_hex_key_lenient(unsigned char *key, const char *hex, unsigned int len) {
+    size_t n = strlen(hex);
+    int ok = (n == 2 * (size_t)len);
+    for (size_t i = 0; ok && i < n; i++) {
+        if (!ishex(hex[i])) {
+            ok = 0;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "[WARN]: chiave ignorata, servono %u cifre esadecimali (trovate %u)\\n", 2 * len, (unsigned int)n);
+        memset(key, 0, len);
+        return;
+    }
+    parse_hex_key(key, hex, len);
+}
+#define parse_hex_key parse_hex_key_lenient
+"""
+open("extkeys.c", "w").write(src[:m.end()] + add + src[m.end():])
+PYEOF
+
 cat > config.mk <<EOF
 CC = $CC
 AR = $AR
