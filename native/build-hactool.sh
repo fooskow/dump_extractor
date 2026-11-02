@@ -49,19 +49,41 @@ grep -q 'hactool_ctx_t base_ctx; /\* Context for base NCA, if used. \*/' main.c 
 sed -i 's|^\(    hactool_ctx_t base_ctx; /\* Context for base NCA, if used. \*/\)$|\1\n    setvbuf(stdout, NULL, _IOLBF, 0);|' main.c
 grep -q 'setvbuf(stdout, NULL, _IOLBF, 0);' main.c || { echo "ERRORE: patch setvbuf non applicata" >&2; exit 1; }
 
-# Gli update recenti hanno una tabella BKTR con dei margini (allineamento) in piu': il controllo
-# "layout esatto" di hactool li rifiuta con "Invalid BKTR layout!" anche se sono validi. Le tabelle
-# vengono lette comunque dagli offset dichiarati, quindi basta verificare che stiano dentro la sezione.
+# Gli update recenti (es. Zelda TotK 1.4.x) hanno le tabelle BKTR con margini di allineamento:
+# hactool le rifiuta con "Invalid BKTR layout!" oppure, peggio, salta il romfs in silenzio
+# (controllo total_size). Le tabelle vengono comunque lette dagli offset dichiarati, e oltre la
+# fine delle voci reali hactool usa gia' una voce finta che parte dalla tabella di rilocazione:
+# basta quindi verificare che tutto stia dentro i limiti. Stampa anche i valori ("[BKTR] ..."),
+# cosi' se qualcosa non torna l'app li mostra nel registro; e se la tabella e' davvero
+# incoerente esce con errore invece di produrre un romfs vuoto.
 python3 - <<'PYEOF'
 import sys
 src = open("nca.c").read()
-old = """        if (sb->relocation_header.offset + sb->relocation_header.size != sb->subsection_header.offset ||
+old1 = """        if (sb->relocation_header.offset + sb->relocation_header.size != sb->subsection_header.offset ||
             sb->subsection_header.offset + sb->subsection_header.size != ctx->size) {"""
-new = """        if (sb->relocation_header.offset + sb->relocation_header.size > sb->subsection_header.offset ||
+new1 = """        printf("[BKTR] sezione 0x%"PRIx64", rilocazione 0x%"PRIx64"+0x%"PRIx64", sottosezioni 0x%"PRIx64"+0x%"PRIx64"\\n",
+               ctx->size, sb->relocation_header.offset, sb->relocation_header.size,
+               sb->subsection_header.offset, sb->subsection_header.size);
+        if (sb->relocation_header.offset + sb->relocation_header.size > sb->subsection_header.offset ||
             sb->subsection_header.offset + sb->subsection_header.size > ctx->size) {"""
-if src.count(old) != 1:
-    sys.exit("ERRORE: patch 'BKTR layout' non applicabile (nca.c cambiato?)")
-open("nca.c", "w").write(src.replace(old, new))
+old2 = """        if (ctx->bktr_ctx.subsection_block->total_size != sb->subsection_header.offset) {
+            free(relocs);"""
+new2 = """        printf("[BKTR] sottosezioni: dimensione coperta 0x%"PRIx64", rilocazione: dimensione virtuale 0x%"PRIx64"\\n",
+               ctx->bktr_ctx.subsection_block->total_size, ctx->bktr_ctx.relocation_block->total_size);
+        if (ctx->bktr_ctx.subsection_block->total_size > sb->subsection_header.offset) {
+            fprintf(stderr, "BKTR incoerente: le sottosezioni coprono 0x%"PRIx64" byte, oltre l'inizio della loro tabella (0x%"PRIx64")\\n",
+                    ctx->bktr_ctx.subsection_block->total_size, sb->subsection_header.offset);
+            exit(EXIT_FAILURE);
+        }
+        if (0) {
+            free(relocs);"""
+for o, n in ((old1, new1), (old2, new2)):
+    if src.count(o) != 1:
+        sys.exit("ERRORE: patch BKTR non applicabile (nca.c cambiato?)")
+    src = src.replace(o, n)
+if "inttypes.h" not in src:
+    src = "#include <inttypes.h>\n" + src
+open("nca.c", "w").write(src)
 PYEOF
 
 # hactool termina subito (exit) se una chiave che conosce ha la lunghezza sbagliata: nelle prod.keys

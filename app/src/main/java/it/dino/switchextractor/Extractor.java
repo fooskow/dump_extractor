@@ -137,10 +137,19 @@ public class Extractor {
             deleteRecursive(exefs);
         }
 
+        // Gli NCA estratti restano in .tmp_nca se il tentativo fallisce: se si riprova con gli stessi
+        // file si riparte da li' invece di rileggere tutto il gioco.
         File tmp = new File(outDir, ".tmp_nca");
-        deleteRecursive(tmp);
-        if (!tmp.mkdirs()) {
-            throw new Exception("Impossibile creare la cartella temporanea: " + tmp);
+        File marker = new File(tmp, ".source");
+        String source = displayName + "|" + input.length() + "|" + (update != null ? update.length() : 0);
+        File baseDir = update != null ? new File(tmp, "base") : tmp;
+        File updDir = new File(tmp, "upd");
+        boolean reuse = source.equals(readSmall(marker)) && hasNca(baseDir) && (update == null || hasNca(updDir));
+        if (!reuse) {
+            deleteRecursive(tmp);
+            if (!tmp.mkdirs() || (update != null && (!baseDir.mkdirs() || !updDir.mkdirs()))) {
+                throw new Exception("Impossibile creare la cartella temporanea: " + tmp);
+            }
         }
 
         long free = outDir.getUsableSpace();
@@ -165,22 +174,28 @@ public class Extractor {
         p3Current = null;
         startTicker();
 
-        File baseDir = update != null ? new File(tmp, "base") : tmp;
-        File updDir = new File(tmp, "upd");
+        boolean ok = false;
         try {
-            if (update != null && (!baseDir.mkdirs() || !updDir.mkdirs())) {
-                throw new Exception("Impossibile creare le cartelle temporanee in " + tmp);
-            }
             int n = update != null ? 4 : 3;
             Map<String, String> titleKeys = new HashMap<String, String>();
             Map<String, String> updKeys = new HashMap<String, String>();
 
-            log.line("[1/" + n + "] Estraggo gli NCA " + (xci ? "dall'XCI" : "dall'NSP")
-                    + (update != null ? " del gioco base" : "") + "...");
-            extractPackage(input, xci, baseDir, titleKeys);
-            if (update != null) {
-                log.line("[2/4] Estraggo gli NCA dall'NSP dell'update...");
-                extractPackage(update, false, updDir, updKeys);
+            if (reuse) {
+                log.line("[1/" + n + "] Riuso gli NCA gia' estratti nel tentativo precedente (stessi file).");
+                collectTickets(baseDir, titleKeys);
+                if (update != null) {
+                    log.line("[2/4] Riuso gli NCA dell'update gia' estratti.");
+                    collectTickets(updDir, updKeys);
+                }
+            } else {
+                log.line("[1/" + n + "] Estraggo gli NCA " + (xci ? "dall'XCI" : "dall'NSP")
+                        + (update != null ? " del gioco base" : "") + "...");
+                extractPackage(input, xci, baseDir, titleKeys);
+                if (update != null) {
+                    log.line("[2/4] Estraggo gli NCA dall'NSP dell'update...");
+                    extractPackage(update, false, updDir, updKeys);
+                }
+                writeSmall(marker, source);
             }
 
             setPhase(ProgressModel.ANALYSIS);
@@ -253,6 +268,14 @@ public class Extractor {
             if (o.code != 0 || (r.romfsFiles == 0 && r.exefsFiles == 0)) {
                 throw new Exception("Estrazione fallita o vuota (codice " + o.code + ").\n" + tail(o.lines, 15));
             }
+            if (r.romfsFiles == 0) {
+                if (patch != null) {
+                    // con un update il romfs c'e' sempre: vuoto vuol dire che la patch non e' stata applicata
+                    throw new Exception("hactool ha estratto l'exefs ma non il romfs: la patch dell'update non e' "
+                            + "stata applicata. L'exefs estratto e' valido.\n" + tail(o.lines, 10));
+                }
+                log.line("Attenzione: il romfs e' vuoto (alcuni titoli non lo hanno, un gioco normale si').");
+            }
             for (String l : o.lines) {
                 if (patch != null && l.contains("Base NCA Title ID doesn't match")) {
                     throw new Exception("hactool dice che il base non corrisponde all'update:\n" + l);
@@ -263,10 +286,16 @@ public class Extractor {
             }
             model.finish(System.nanoTime());
             emit();
+            ok = true;
             return r;
         } finally {
             stopTicker();
-            deleteRecursive(tmp);
+            if (ok || !marker.isFile()) {
+                deleteRecursive(tmp);
+            } else {
+                log.line("Gli NCA estratti restano in " + tmp + " (" + human(dirBytes(tmp))
+                        + "): se riprovi con gli stessi file si riparte da qui. Cancellali se non ti servono.");
+            }
             new File(new File(homeDir, ".switch"), "title.keys").delete();
         }
     }
@@ -289,6 +318,11 @@ public class Extractor {
         if (o.code != 0) {
             throw new Exception("Estrazione NSP fallita (codice " + o.code + ").\n" + tail(o.lines, 12));
         }
+        collectTickets(dir, titleKeys);
+    }
+
+    /** Legge i .tik estratti da un NSP e ne raccoglie le titlekey. */
+    private void collectTickets(File dir, Map<String, String> titleKeys) throws IOException {
         File[] tiks = dir.listFiles();
         if (tiks != null) {
             for (File f : tiks) {
@@ -302,6 +336,52 @@ public class Extractor {
                     }
                 }
             }
+        }
+    }
+
+    private static boolean hasNca(File dir) {
+        File[] kids = dir.listFiles();
+        if (kids != null) {
+            for (File k : kids) {
+                if (k.getName().toLowerCase(Locale.ROOT).endsWith(".nca")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static String readSmall(File f) {
+        if (!f.isFile() || f.length() > 4096) {
+            return null;
+        }
+        try {
+            byte[] b = new byte[(int) f.length()];
+            FileInputStream in = new FileInputStream(f);
+            try {
+                int off = 0;
+                while (off < b.length) {
+                    int r = in.read(b, off, b.length - off);
+                    if (r < 0) {
+                        break;
+                    }
+                    off += r;
+                }
+            } finally {
+                in.close();
+            }
+            return new String(b, "UTF-8");
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static void writeSmall(File f, String text) throws IOException {
+        java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+        try {
+            out.write(text.getBytes("UTF-8"));
+        } finally {
+            out.close();
         }
     }
 
@@ -501,6 +581,9 @@ public class Extractor {
                             log.files(saved);
                         }
                         continue;
+                    }
+                    if (line.startsWith("[BKTR]")) {
+                        log.line("  hactool " + line);
                     }
                     out.lines.add(line);
                 }
