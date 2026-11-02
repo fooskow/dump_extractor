@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'it.dino.switchextractor'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'it.dino.switchextractor'
+        minSdk 30          // Android 11+: serve MANAGE_EXTERNAL_STORAGE
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+
+        // hactool e' compilato solo per arm64 (AYN Thor e praticamente ogni telefono recente)
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // Chiave di firma fissa: cosi' gli aggiornamenti si installano sopra la versione precedente.
+    // E' una chiave "usa e getta" per uso personale (sideload), non per il Play Store.
+    signingConfigs {
+        release {
+            storeFile file('release.keystore')
+            storePassword 'switchextractor'
+            keyAlias 'switchextractor'
+            keyPassword 'switchextractor'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    // Android estrae le .so su disco (necessario per eseguire libhactool.so come programma)
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
