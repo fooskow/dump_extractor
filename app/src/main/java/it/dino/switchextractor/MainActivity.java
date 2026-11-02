@@ -43,6 +43,7 @@ public class MainActivity extends Activity {
     private static final int REQ_KEYS = 1;
     private static final int REQ_GAME = 2;
     private static final int REQ_OUT = 3;
+    private static final int REQ_UPD = 4;
 
     private static final String DEFAULT_OUT = "/storage/emulated/0/SwitchExtract";
 
@@ -54,6 +55,10 @@ public class MainActivity extends Activity {
     private String gameName;
     private long gameSize;
     private String outBase;
+    private Uri updUri;
+    private String updName;
+    private long updSize;
+    private TextView btnUpdClear;
 
     private Extractor extractor;
     private Thread worker;
@@ -69,9 +74,9 @@ public class MainActivity extends Activity {
     // viste
     private ScrollView page;
     private LinearLayout permBanner;
-    private TextView[] stepBadge = new TextView[3];
-    private View[] stepLine = new View[2];
-    private TextView[] stepValue = new TextView[3];
+    private TextView[] stepBadge = new TextView[4];
+    private View[] stepLine = new View[3];
+    private TextView[] stepValue = new TextView[4];
     private TextView btnRun;
     private LinearLayout progressCard;
     private TextView tvPct;
@@ -161,10 +166,10 @@ public class MainActivity extends Activity {
         stLp.topMargin = dp(24);
         col.addView(steps, stLp);
 
-        String[] titles = {"Chiavi della tua Switch", "Gioco", "Cartella di output"};
-        String[] actions = {"Scegli prod.keys", "Scegli il gioco", "Cambia cartella"};
-        final int[] reqs = {REQ_KEYS, REQ_GAME, REQ_OUT};
-        for (int i = 0; i < 3; i++) {
+        String[] titles = {"Chiavi della tua Switch", "Gioco base", "Aggiornamento (facoltativo)", "Cartella di output"};
+        String[] actions = {"Scegli prod.keys", "Scegli il gioco", "Scegli l'update (.nsp)", "Cambia cartella"};
+        final int[] reqs = {REQ_KEYS, REQ_GAME, REQ_UPD, REQ_OUT};
+        for (int i = 0; i < 4; i++) {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
 
@@ -178,7 +183,7 @@ public class MainActivity extends Activity {
             badge.setFontFeatureSettings("tnum");
             stepBadge[i] = badge;
             rail.addView(badge, new LinearLayout.LayoutParams(dp(28), dp(28)));
-            if (i < 2) {
+            if (i < 3) {
                 View line = new View(this);
                 stepLine[i] = line;
                 LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(dp(2), 0, 1f);
@@ -190,7 +195,7 @@ public class MainActivity extends Activity {
 
             LinearLayout body = new LinearLayout(this);
             body.setOrientation(LinearLayout.VERTICAL);
-            body.setPadding(dp(14), 0, 0, i < 2 ? dp(20) : 0);
+            body.setPadding(dp(14), 0, 0, i < 3 ? dp(20) : 0);
             body.addView(text(titles[i], 16, fSemi, R.color.ink, 3));
             TextView val = text("", 14, fRegular, R.color.ink2, 2);
             val.setLineSpacing(0, 1.1f);
@@ -215,7 +220,29 @@ public class MainActivity extends Activity {
             });
             LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
             alp.topMargin = dp(10);
-            body.addView(act, alp);
+            if (req == REQ_UPD) {
+                LinearLayout acts = new LinearLayout(this);
+                acts.setOrientation(LinearLayout.HORIZONTAL);
+                acts.addView(act, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+                btnUpdClear = button("Rimuovi", false);
+                btnUpdClear.setVisibility(View.GONE);
+                btnUpdClear.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (!running) {
+                            updUri = null;
+                            updName = null;
+                            updateSteps();
+                        }
+                    }
+                });
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
+                clp.leftMargin = dp(8);
+                acts.addView(btnUpdClear, clp);
+                body.addView(acts, alp);
+            } else {
+                body.addView(act, alp);
+            }
             row.addView(body, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             steps.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
@@ -438,13 +465,16 @@ public class MainActivity extends Activity {
 
     /** Aggiorna rotaia, spunte e testi dei tre passi; abilita il pulsante principale. */
     private void updateSteps() {
-        boolean[] done = {keysLoaded(), gameUri != null, true};
+        boolean[] done = {keysLoaded(), gameUri != null, updUri != null, true};
         String[] vals = {
                 keysLoaded() ? prefs.getString("keysName", "Caricata") : "Nessun file scelto",
                 gameUri != null ? gameName + (gameSize >= 0 ? " (" + Fmt.bytes(gameSize) + ")" : "") : "Nessun file scelto",
+                updUri != null ? updName + (updSize >= 0 ? " (" + Fmt.bytes(updSize) + ")" : "")
+                        : "Nessuno: estraggo solo il gioco base",
                 outBase + "/<nome del gioco>"
         };
-        for (int i = 0; i < 3; i++) {
+        btnUpdClear.setVisibility(updUri != null ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < 4; i++) {
             stepValue[i].setText(vals[i]);
             boolean d = done[i];
             stepBadge[i].setText(d ? "\u2713" : String.valueOf(i + 1));
@@ -459,7 +489,7 @@ public class MainActivity extends Activity {
                 stepBadge[i].setTextColor(color(R.color.ink2));
             }
             stepBadge[i].setBackground(g);
-            if (i < 2) {
+            if (i < 3) {
                 stepLine[i].setBackgroundColor(color(d ? R.color.data : R.color.line));
             }
         }
@@ -562,6 +592,8 @@ public class MainActivity extends Activity {
                 importKeys(uri);
             } else if (requestCode == REQ_GAME) {
                 chooseGame(uri);
+            } else if (requestCode == REQ_UPD) {
+                chooseUpdate(uri);
             } else if (requestCode == REQ_OUT) {
                 chooseOutput(uri);
             }
@@ -683,6 +715,18 @@ public class MainActivity extends Activity {
         gameUri = uri;
         gameName = name;
         gameSize = size(uri);
+        updateSteps();
+    }
+
+    private void chooseUpdate(Uri uri) {
+        String name = displayName(uri);
+        if (!name.toLowerCase(Locale.ROOT).endsWith(".nsp")) {
+            toast("L'aggiornamento deve essere un file .nsp (hai scelto \"" + name + "\").");
+            return;
+        }
+        updUri = uri;
+        updName = name;
+        updSize = size(uri);
         updateSteps();
     }
 
@@ -826,6 +870,39 @@ public class MainActivity extends Activity {
             logError("Impossibile aprire il gioco", e);
             return;
         }
+
+        // aggiornamento, se scelto: stessa logica
+        File updInput = null;
+        ParcelFileDescriptor updPfd = null;
+        if (updUri != null) {
+            log("Update: " + updName);
+            try {
+                File ud = resolveGamePath(updUri);
+                if (ud != null) {
+                    updInput = ud;
+                    log("Leggo l'update da: " + ud);
+                } else {
+                    updPfd = getContentResolver().openFileDescriptor(updUri, "r");
+                    if (updPfd == null) {
+                        throw new Exception("Il selettore non ha restituito il file dell'update");
+                    }
+                    updInput = new File("/proc/" + android.os.Process.myPid() + "/fd/" + updPfd.getFd());
+                    log("Percorso dell'update non ricavabile: lo leggo tramite descrittore di file.");
+                }
+            } catch (Exception e) {
+                if (pfd != null) {
+                    try {
+                        pfd.close();
+                    } catch (Exception ignored) {
+                        // niente da fare
+                    }
+                }
+                logError("Impossibile aprire l'update", e);
+                return;
+            }
+        }
+        final File updFile = updInput;
+        final ParcelFileDescriptor holdUpd = updPfd;
         log("Non chiudere l'app finche' non finisce.");
         final ParcelFileDescriptor holdPfd = pfd;
 
@@ -869,12 +946,19 @@ public class MainActivity extends Activity {
                 Extractor.Result res = null;
                 Throwable err = null;
                 try {
-                    res = ex.run(input, name, outDir, overwrite);
+                    res = ex.run(input, name, updFile, outDir, overwrite);
                 } catch (InterruptedException ie) {
                     err = ie;
                 } catch (Throwable e) {
                     err = e;
                 } finally {
+                    if (holdUpd != null) {
+                        try {
+                            holdUpd.close();
+                        } catch (Exception ignored) {
+                            // niente da fare
+                        }
+                    }
                     if (holdPfd != null) {
                         try {
                             holdPfd.close();

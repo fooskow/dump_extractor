@@ -98,6 +98,15 @@ public class Extractor {
      * affidabile (per esempio /proc/PID/fd/N ottenuto dal selettore di sistema).
      */
     public Result run(File input, String displayName, File outDir, boolean overwrite) throws Exception {
+        return run(input, displayName, null, outDir, overwrite);
+    }
+
+    /**
+     * Come sopra, ma con un NSP di aggiornamento: romfs ed exefs escono gia' "patchati"
+     * (il romfs dell'update e' una differenza rispetto a quello del gioco base, hactool la applica
+     * se gli si danno entrambi gli NCA Program).
+     */
+    public Result run(File input, String displayName, File update, File outDir, boolean overwrite) throws Exception {
         String lower = displayName.toLowerCase(Locale.ROOT);
         boolean xci = lower.endsWith(".xci");
         boolean nsp = lower.endsWith(".nsp");
@@ -106,6 +115,9 @@ public class Extractor {
         }
         if (!input.isFile()) {
             throw new Exception("File non trovato: " + input);
+        }
+        if (update != null && !update.isFile()) {
+            throw new Exception("File dell'update non trovato: " + update);
         }
         if (!keys.isFile() || keys.length() == 0) {
             throw new Exception("prod.keys non caricata: scegli il file delle chiavi.");
@@ -132,7 +144,7 @@ public class Extractor {
         }
 
         long free = outDir.getUsableSpace();
-        long need = input.length();
+        long need = input.length() + (update != null ? update.length() : 0);
         if (free > 0 && free < need) {
             log.line("ATTENZIONE: spazio libero " + human(free) + ", il file e' " + human(need)
                     + ". Serve piu' o meno il doppio del gioco (NCA temporanei + estratti).");
@@ -142,6 +154,10 @@ public class Extractor {
         PackageInfo info = PackageInfo.read(input, xci);
         long w1 = info != null ? info.ncaBytes : input.length();
         long w3 = info != null ? info.largestNca : (long) (w1 * 0.97);
+        if (update != null) {
+            PackageInfo ui = PackageInfo.read(update, false);
+            w1 += ui != null ? ui.ncaBytes : update.length();
+        }
         model = new ProgressModel(w1, w3, System.nanoTime());
         phaseNow = ProgressModel.PACKAGE;
         watchDir = tmp;
@@ -149,65 +165,87 @@ public class Extractor {
         p3Current = null;
         startTicker();
 
+        File baseDir = update != null ? new File(tmp, "base") : tmp;
+        File updDir = new File(tmp, "upd");
         try {
+            if (update != null && (!baseDir.mkdirs() || !updDir.mkdirs())) {
+                throw new Exception("Impossibile creare le cartelle temporanee in " + tmp);
+            }
+            int n = update != null ? 4 : 3;
             Map<String, String> titleKeys = new HashMap<String, String>();
+            Map<String, String> updKeys = new HashMap<String, String>();
 
-            if (xci) {
-                log.line("[1/3] Estraggo gli NCA dall'XCI...");
-                Out o = exec(args("-t", "xci", "--securedir=" + tmp.getAbsolutePath(),
-                        input.getAbsolutePath()), false);
-                if (o.code != 0) {
-                    throw new Exception("Estrazione XCI fallita (codice " + o.code + ").\n" + tail(o.lines, 12)
-                            + "\nControlla che prod.keys sia recente quanto il firmware del gioco.");
-                }
-            } else {
-                log.line("[1/3] Estraggo gli NCA dall'NSP...");
-                Out o = exec(args("-t", "pfs0", "--outdir=" + tmp.getAbsolutePath(),
-                        input.getAbsolutePath()), false);
-                if (o.code != 0) {
-                    throw new Exception("Estrazione NSP fallita (codice " + o.code + ").\n" + tail(o.lines, 12));
-                }
-                File[] tiks = tmp.listFiles();
-                if (tiks != null) {
-                    for (File f : tiks) {
-                        if (f.getName().toLowerCase(Locale.ROOT).endsWith(".tik")) {
-                            Ticket t = parseTicket(f);
-                            if (t.personalized) {
-                                log.line("Ticket personalizzato ignorato: " + f.getName());
-                            } else {
-                                titleKeys.put(t.rightsId, t.encTitleKey);
-                                log.line("Ticket letto: " + f.getName());
-                            }
-                        }
-                    }
-                }
+            log.line("[1/" + n + "] Estraggo gli NCA " + (xci ? "dall'XCI" : "dall'NSP")
+                    + (update != null ? " del gioco base" : "") + "...");
+            extractPackage(input, xci, baseDir, titleKeys);
+            if (update != null) {
+                log.line("[2/4] Estraggo gli NCA dall'NSP dell'update...");
+                extractPackage(update, false, updDir, updKeys);
             }
 
             setPhase(ProgressModel.ANALYSIS);
-            log.line("[2/3] Cerco l'NCA principale (tipo Program)...");
-            NcaInfo program = findProgramNca(tmp);
+            log.line("[" + (n - 1) + "/" + n + "] Cerco l'NCA principale (tipo Program)"
+                    + (update != null ? ", nel base e nell'update" : "") + "...");
+            NcaInfo program = findProgramNca(baseDir);
+            NcaInfo patch = null;
+            if (update != null) {
+                if (program.titleId != null && program.titleId.endsWith("800")) {
+                    throw new Exception("Il file scelto come gioco contiene solo un update (Title ID "
+                            + program.titleId + "), non il gioco base. Scegli l'XCI/NSP del gioco base.");
+                }
+                patch = findProgramNca(updDir);
+                if (patch.titleId == null || !patch.titleId.endsWith("800")) {
+                    throw new Exception("L'NSP scelto come update non contiene un aggiornamento (Title ID "
+                            + patch.titleId + "): di solito finisce con 800.");
+                }
+                if (program.titleId != null && program.titleId.length() == patch.titleId.length()
+                        && !program.titleId.substring(0, program.titleId.length() - 3)
+                        .equals(patch.titleId.substring(0, patch.titleId.length() - 3))) {
+                    throw new Exception("L'update non e' di questo gioco: base " + program.titleId
+                            + ", update " + patch.titleId + ".");
+                }
+                log.line("Update compatibile: base " + program.titleId + ", update " + patch.titleId);
+            }
+
+            // titlekey per l'NCA che si estrae davvero (l'update, se c'e')
+            NcaInfo target = patch != null ? patch : program;
+            Map<String, String> targetKeys = patch != null ? updKeys : titleKeys;
             String titleKey = null;
-            if (program.rightsId != null) {
-                titleKey = titleKeys.get(program.rightsId);
-                if (titleKey == null && nsp) {
+            if (target.rightsId != null) {
+                titleKey = targetKeys.get(target.rightsId);
+                if (titleKey == null && (nsp || patch != null)) {
                     throw new Exception("L'NCA principale e' cifrato con titlekey (rights id "
-                            + program.rightsId + ") ma nell'NSP non c'e' un ticket utilizzabile.");
+                            + target.rightsId + ") ma nell'NSP non c'e' un ticket utilizzabile.");
+                }
+            }
+            // il base e' letto da hactool tramite title.keys (la sua --titlekey vale solo per l'NCA bersaglio)
+            if (patch != null && program.rightsId != null) {
+                String baseKey = titleKeys.get(program.rightsId);
+                if (baseKey != null) {
+                    writeTitleKeys(program.rightsId, baseKey);
+                } else {
+                    log.line("Nota: anche l'NCA del base usa una titlekey ma non ho un ticket per il base: "
+                            + "se l'estrazione fallisce, serve il base come NSP con il suo .tik.");
                 }
             }
 
             p3Done = 0;
             p3Current = null;
             setPhase(ProgressModel.EXTRACT);
-            log.line("[3/3] Estraggo romfs ed exefs da " + program.file.getName() + " ...");
+            log.line("[" + n + "/" + n + "] Estraggo romfs ed exefs da " + target.file.getName()
+                    + (patch != null ? " applicando la patch sul base " + program.file.getName() : "") + " ...");
             List<String> a = new ArrayList<String>();
             if (titleKey != null) {
                 a.add("--titlekey=" + titleKey);
+            }
+            if (patch != null) {
+                a.add("--basenca=" + program.file.getAbsolutePath());
             }
             a.add("-t");
             a.add("nca");
             a.add("--romfsdir=" + romfs.getAbsolutePath());
             a.add("--exefsdir=" + exefs.getAbsolutePath());
-            a.add(program.file.getAbsolutePath());
+            a.add(target.file.getAbsolutePath());
             Out o = exec(a, true);
 
             Result r = new Result();
@@ -220,6 +258,9 @@ public class Extractor {
                 throw new Exception("Estrazione fallita o vuota (codice " + o.code + ").\n" + tail(o.lines, 15));
             }
             for (String l : o.lines) {
+                if (patch != null && l.contains("Base NCA Title ID doesn't match")) {
+                    throw new Exception("hactool dice che il base non corrisponde all'update:\n" + l);
+                }
                 if (l.contains("Unable to match rights id")) {
                     throw new Exception("Titlekey non trovata per questo NCA: i file estratti sarebbero illeggibili.");
                 }
@@ -230,12 +271,57 @@ public class Extractor {
         } finally {
             stopTicker();
             deleteRecursive(tmp);
+            new File(new File(homeDir, ".switch"), "title.keys").delete();
         }
     }
 
     // ------------------------------------------------------------------
     // Ricerca dell'NCA Program (preferisce il gioco base all'update)
     // ------------------------------------------------------------------
+
+    /** Estrae gli NCA (e i ticket) di un .xci / .nsp in dir; per gli NSP riempie titleKeys. */
+    private void extractPackage(File pkg, boolean xci, File dir, Map<String, String> titleKeys) throws Exception {
+        if (xci) {
+            Out o = exec(args("-t", "xci", "--securedir=" + dir.getAbsolutePath(), pkg.getAbsolutePath()), false);
+            if (o.code != 0) {
+                throw new Exception("Estrazione XCI fallita (codice " + o.code + ").\n" + tail(o.lines, 12)
+                        + "\nControlla che prod.keys sia recente quanto il firmware del gioco.");
+            }
+            return;
+        }
+        Out o = exec(args("-t", "pfs0", "--outdir=" + dir.getAbsolutePath(), pkg.getAbsolutePath()), false);
+        if (o.code != 0) {
+            throw new Exception("Estrazione NSP fallita (codice " + o.code + ").\n" + tail(o.lines, 12));
+        }
+        File[] tiks = dir.listFiles();
+        if (tiks != null) {
+            for (File f : tiks) {
+                if (f.getName().toLowerCase(Locale.ROOT).endsWith(".tik")) {
+                    Ticket t = parseTicket(f);
+                    if (t.personalized) {
+                        log.line("Ticket personalizzato ignorato: " + f.getName());
+                    } else {
+                        titleKeys.put(t.rightsId, t.encTitleKey);
+                        log.line("Ticket letto: " + f.getName());
+                    }
+                }
+            }
+        }
+    }
+
+    /** title.keys nella cartella HOME di hactool: "rights id = titlekey cifrata". */
+    private void writeTitleKeys(String rightsId, String encKey) throws IOException {
+        File dir = new File(homeDir, ".switch");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new IOException("Impossibile creare " + dir);
+        }
+        java.io.FileWriter w = new java.io.FileWriter(new File(dir, "title.keys"));
+        try {
+            w.write(rightsId + " = " + encKey + "\n");
+        } finally {
+            w.close();
+        }
+    }
 
     private NcaInfo findProgramNca(File dir) throws Exception {
         File[] ncas = dir.listFiles();
@@ -490,7 +576,7 @@ public class Extractor {
         long n = 0;
         if (kids != null) {
             for (File k : kids) {
-                n += k.length();
+                n += k.isDirectory() ? dirBytes(k) : k.length();
             }
         }
         return n;
