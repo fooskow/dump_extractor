@@ -49,6 +49,21 @@ grep -q 'hactool_ctx_t base_ctx; /\* Context for base NCA, if used. \*/' main.c 
 sed -i 's|^\(    hactool_ctx_t base_ctx; /\* Context for base NCA, if used. \*/\)$|\1\n    setvbuf(stdout, NULL, _IOLBF, 0);|' main.c
 grep -q 'setvbuf(stdout, NULL, _IOLBF, 0);' main.c || { echo "ERRORE: patch setvbuf non applicata" >&2; exit 1; }
 
+# Gli update recenti hanno una tabella BKTR con dei margini (allineamento) in piu': il controllo
+# "layout esatto" di hactool li rifiuta con "Invalid BKTR layout!" anche se sono validi. Le tabelle
+# vengono lette comunque dagli offset dichiarati, quindi basta verificare che stiano dentro la sezione.
+python3 - <<'PYEOF'
+import sys
+src = open("nca.c").read()
+old = """        if (sb->relocation_header.offset + sb->relocation_header.size != sb->subsection_header.offset ||
+            sb->subsection_header.offset + sb->subsection_header.size != ctx->size) {"""
+new = """        if (sb->relocation_header.offset + sb->relocation_header.size > sb->subsection_header.offset ||
+            sb->subsection_header.offset + sb->subsection_header.size > ctx->size) {"""
+if src.count(old) != 1:
+    sys.exit("ERRORE: patch 'BKTR layout' non applicabile (nca.c cambiato?)")
+open("nca.c", "w").write(src.replace(old, new))
+PYEOF
+
 # hactool termina subito (exit) se una chiave che conosce ha la lunghezza sbagliata: nelle prod.keys
 # reali capita (es. una riga con un byte in piu'). Per le chiavi lette da file la ignoriamo (resta a
 # zero) invece di chiudere il programma; da riga di comando (--titlekey) il comportamento non cambia.
