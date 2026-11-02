@@ -15,17 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
+      # Il runner ha gia' l'Android SDK (ANDROID_HOME): installiamo solo quello che serve.
       - name: Installa piattaforma, build-tools e NDK
         run: |
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKM="$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264"
 
       - name: Compila hactool per Android arm64
         run: |
