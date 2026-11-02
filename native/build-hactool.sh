@@ -86,6 +86,57 @@ if "inttypes.h" not in src:
 open("nca.c", "w").write(src)
 PYEOF
 
+# Diagnostica per gli update recenti: informazioni di compressione/sparse delle sezioni RomFS,
+# intestazione del RomFS virtuale e punto esatto di eventuali letture fallite. Righe "[DIAG] ...".
+python3 - <<'PYEOF'
+import sys
+src = open("nca.c").read()
+helper = """
+static void diag_fs_header(const char *tag, nca_section_ctx_t *ctx) {
+    const uint8_t *h = (const uint8_t *)ctx->header;
+    uint64_t c_off, c_size, s_off, s_size; uint32_t c_magic, c_cnt, s_magic, s_cnt;
+    memcpy(&s_off, h + 0x148, 8); memcpy(&s_size, h + 0x150, 8); memcpy(&s_magic, h + 0x158, 4); memcpy(&s_cnt, h + 0x160, 4);
+    memcpy(&c_off, h + 0x178, 8); memcpy(&c_size, h + 0x180, 8); memcpy(&c_magic, h + 0x188, 4); memcpy(&c_cnt, h + 0x190, 4);
+    printf("[DIAG] %s: sezione 0x%"PRIx64", cifratura %u, compressione 0x%"PRIx64"+0x%"PRIx64" (magic %08x, voci %u), sparse 0x%"PRIx64"+0x%"PRIx64" (magic %08x, voci %u)\\n",
+           tag, ctx->size, (unsigned)ctx->header->crypt_type, c_off, c_size, c_magic, c_cnt, s_off, s_size, s_magic, s_cnt);
+}
+
+"""
+a1 = "void nca_process_ivfc_section(nca_section_ctx_t *ctx) {"
+a2 = "void nca_process_bktr_section(nca_section_ctx_t *ctx) {"
+o3 = """            if (nca_section_fread(ctx, &ctx->bktr_ctx.header, sizeof(romfs_hdr_t)) != sizeof(romfs_hdr_t)) {
+                fprintf(stderr, "Failed to read BKTR Virtual RomFS header!\\n");
+            }
+"""
+n3 = o3 + """            printf("[DIAG] RomFS virtuale a 0x%"PRIx64": header 0x%"PRIx64", cartelle 0x%"PRIx64"+0x%"PRIx64", file 0x%"PRIx64"+0x%"PRIx64", dati 0x%"PRIx64"\\n",
+                   ctx->bktr_ctx.romfs_offset, ctx->bktr_ctx.header.header_size,
+                   ctx->bktr_ctx.header.dir_meta_table_offset, ctx->bktr_ctx.header.dir_meta_table_size,
+                   ctx->bktr_ctx.header.file_meta_table_offset, ctx->bktr_ctx.header.file_meta_table_size,
+                   ctx->bktr_ctx.header.data_offset);
+"""
+o4 = """    bktr_subsection_entry_t *subsec = bktr_get_subsection(ctx->bktr_ctx.subsection_block, ctx->bktr_ctx.bktr_seek);"""
+n4 = """    {
+        struct stat diag_st;
+        if (fstat(fileno(ctx->file), &diag_st) == 0 && (uint64_t)ctx->offset + ctx->bktr_ctx.bktr_seek + count > (uint64_t)diag_st.st_size) {
+            fprintf(stderr, "[DIAG] lettura oltre la fine dell'NCA: virtuale 0x%"PRIx64" -> fisico 0x%"PRIx64" (+0x%zx), sezione da 0x%"PRIx64", file 0x%"PRIx64"\\n",
+                    ctx->bktr_ctx.virtual_seek, ctx->bktr_ctx.bktr_seek, count, (uint64_t)ctx->offset, (uint64_t)diag_st.st_size);
+        }
+    }
+""" + o4
+for o in (a1, a2, o3, o4):
+    if src.count(o) != 1:
+        sys.exit("ERRORE: patch diagnostica non applicabile: " + o[:40])
+src = src.replace(a1, helper + a1 + '\n    diag_fs_header("RomFS", ctx);', 1)
+src = src.replace(a2, a2 + '\n    diag_fs_header("BKTR", ctx);', 1)
+src = src.replace(o3, n3, 1)
+src = src.replace(o4, n4, 1)
+if "#include <sys/stat.h>" not in src:
+    src = "#include <sys/stat.h>\n" + src
+if "#include <string.h>" not in src:
+    src = "#include <string.h>\n" + src
+open("nca.c", "w").write(src)
+PYEOF
+
 # hactool termina subito (exit) se una chiave che conosce ha la lunghezza sbagliata: nelle prod.keys
 # reali capita (es. una riga con un byte in piu'). Per le chiavi lette da file la ignoriamo (resta a
 # zero) invece di chiudere il programma; da riga di comando (--titlekey) il comportamento non cambia.

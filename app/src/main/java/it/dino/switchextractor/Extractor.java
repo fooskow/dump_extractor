@@ -582,7 +582,7 @@ public class Extractor {
                         }
                         continue;
                     }
-                    if (line.startsWith("[BKTR]")) {
+                    if (line.startsWith("[BKTR]") || line.startsWith("[DIAG]")) {
                         log.line("  hactool " + line);
                     }
                     out.lines.add(line);
