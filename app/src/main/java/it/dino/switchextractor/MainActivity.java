@@ -14,7 +14,6 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
@@ -60,10 +59,10 @@ public class MainActivity extends Activity {
     private long updSize;
     private TextView btnUpdClear;
 
-    private Extractor extractor;
-    private Thread worker;
-    private PowerManager.WakeLock wakeLock;
     private boolean running;
+    private boolean askedNotif;
+    private TextView batBannerBtn;
+    private LinearLayout batBanner;
 
     // caratteri
     private Typeface fRegular;
@@ -158,6 +157,32 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams pbn = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         pbn.topMargin = dp(20);
         col.addView(permBanner, pbn);
+
+        batBanner = new LinearLayout(this);
+        batBanner.setOrientation(LinearLayout.VERTICAL);
+        batBanner.setPadding(dp(16), dp(14), dp(16), dp(14));
+        batBanner.setBackground(rounded(R.color.surface, 16, R.color.line, 1));
+        batBanner.addView(text("Per lavorare a schermo spento", 15, fSemi, R.color.ink, 0));
+        batBanner.addView(text("Togli il risparmio energetico per questa app, altrimenti il sistema puo' fermare "
+                + "l'estrazione quando lo schermo si spegne.", 13, fRegular, R.color.ink2, 2));
+        batBannerBtn = button("Non limitare la batteria", false);
+        batBannerBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:" + getPackageName())));
+                } catch (Exception e) {
+                    startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                }
+            }
+        });
+        LinearLayout.LayoutParams bbLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
+        bbLp.topMargin = dp(10);
+        batBanner.addView(batBannerBtn, bbLp);
+        LinearLayout.LayoutParams bbn = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bbn.topMargin = dp(12);
+        col.addView(batBanner, bbn);
 
         // passi
         LinearLayout steps = new LinearLayout(this);
@@ -324,9 +349,7 @@ public class MainActivity extends Activity {
         btnCancel.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (extractor != null) {
-                    extractor.cancel();
-                }
+                RunHub.get().cancel();
             }
         });
         LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
@@ -443,15 +466,14 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshStatus();
+        syncFromHub();
+        RunHub.get().attach(hubListener);
     }
 
     @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (extractor != null && worker != null && worker.isAlive()) {
-            extractor.cancel();
-        }
-        releaseWakeLock();
+    protected void onPause() {
+        super.onPause();
+        RunHub.get().detach(hubListener);
     }
 
     private boolean keysLoaded() {
@@ -460,6 +482,8 @@ public class MainActivity extends Activity {
 
     private void refreshStatus() {
         permBanner.setVisibility(Environment.isExternalStorageManager() ? View.GONE : View.VISIBLE);
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        batBanner.setVisibility(pm.isIgnoringBatteryOptimizations(getPackageName()) ? View.GONE : View.VISIBLE);
         updateSteps();
     }
 
@@ -503,6 +527,10 @@ public class MainActivity extends Activity {
         Toast.makeText(this, s, Toast.LENGTH_LONG).show();
     }
 
+    private void appendLog(String s) {
+        log(s);
+    }
+
     private void log(String s) {
         boolean atBottom = logScroll.getChildAt(0).getBottom() - (logScroll.getHeight() + logScroll.getScrollY()) < dp(48);
         tvLog.append(s + "\n");
@@ -518,23 +546,7 @@ public class MainActivity extends Activity {
 
     /** Errore completo (tipo + messaggio + causa + prime righe di stack) nel log, selezionabile e copiabile. */
     private void logError(String what, Throwable t) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("ERRORE: ").append(what).append('\n');
-        Throwable c = t;
-        int depth = 0;
-        while (c != null && depth < 4) {
-            sb.append(depth == 0 ? "  " : "  causa: ").append(c.getClass().getName())
-                    .append(": ").append(String.valueOf(c.getMessage())).append('\n');
-            c = c.getCause();
-            depth++;
-        }
-        StringWriter sw = new StringWriter();
-        t.printStackTrace(new PrintWriter(sw));
-        String[] lines = sw.toString().split("\n");
-        for (int i = 1; i < lines.length && i <= 6; i++) {
-            sb.append("  ").append(lines[i].trim()).append('\n');
-        }
-        log(sb.toString());
+        log(RunHub.errorText(what, t));
         toast(what + ": " + t.getClass().getSimpleName() + " (dettagli nel registro in basso)");
     }
 
@@ -731,7 +743,7 @@ public class MainActivity extends Activity {
     }
 
     private void chooseOutput(Uri tree) {
-        String path = pathFromDocId(DocumentsContract.getTreeDocumentId(tree), tree.getAuthority());
+        String path = DocPaths.pathFromDocId(DocumentsContract.getTreeDocumentId(tree), tree.getAuthority());
         if (path == null) {
             toast("Scegli una cartella dalla memoria interna o dalla scheda SD (non da altre app).");
             return;
@@ -739,46 +751,6 @@ public class MainActivity extends Activity {
         outBase = path;
         prefs.edit().putString("outBase", path).apply();
         updateSteps();
-    }
-
-    /**
-     * Converte un document id del provider della memoria ("primary:Download/x.xci",
-     * "1234-ABCD:Games") in un percorso vero. null se non e' il provider della memoria.
-     */
-    private static String pathFromDocId(String docId, String authority) {
-        if (docId == null || !"com.android.externalstorage.documents".equals(authority)) {
-            return null;
-        }
-        int colon = docId.indexOf(':');
-        if (colon < 0) {
-            return null;
-        }
-        String vol = docId.substring(0, colon);
-        String rel = docId.substring(colon + 1);
-        String base = "primary".equals(vol) ? "/storage/emulated/0" : "/storage/" + vol;
-        return rel.length() == 0 ? base : base + "/" + rel;
-    }
-
-    /** Percorso reale del gioco scelto, se ricavabile; altrimenti null (si usera' il descrittore di file). */
-    private File resolveGamePath(Uri uri) {
-        try {
-            if (DocumentsContract.isDocumentUri(this, uri)) {
-                String docId = DocumentsContract.getDocumentId(uri);
-                String p = pathFromDocId(docId, uri.getAuthority());
-                if (p == null && docId != null && docId.startsWith("raw:")) {
-                    p = docId.substring(4);
-                }
-                if (p != null) {
-                    File f = new File(p);
-                    if (f.isFile() && f.canRead()) {
-                        return f;
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // si passa al fallback
-        }
-        return null;
     }
 
     // ------------------------------------------------------------------
@@ -828,10 +800,41 @@ public class MainActivity extends Activity {
     }
 
     private void startRun(final File outDir, final boolean overwrite) {
-        final File hactool = new File(getApplicationInfo().nativeLibraryDir, "libhactool.so");
-        final Uri uri = gameUri;
-        final String name = gameName;
+        // le notifiche servono solo per vedere l'avanzamento a schermo spento: il lavoro parte comunque
+        if (!askedNotif && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            askedNotif = true;
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 10);
+        }
+        RunService.Request r = new RunService.Request();
+        r.game = gameUri;
+        r.gameName = gameName;
+        r.update = updUri;
+        r.updateName = updName;
+        r.outDir = outDir;
+        r.overwrite = overwrite;
+        r.keys = keysFile;
+
         tvLog.setText("");
+        resetProgressUi();
+        try {
+            RunService.start(this, r);
+        } catch (Exception e) {
+            RunHub.get().finish(RunHub.FAILED, "");
+            syncFromHub();
+            logError("Impossibile avviare il servizio di estrazione", e);
+            return;
+        }
+        setRunning(true);
+        page.post(new Runnable() {
+            @Override
+            public void run() {
+                page.smoothScrollTo(0, progressCard.getTop() - dp(12));
+            }
+        });
+    }
+
+    private void resetProgressUi() {
         tvCount.setText("0");
         tvEta.setText("in calcolo");
         tvDetail.setText("");
@@ -841,174 +844,69 @@ public class MainActivity extends Activity {
         bar.setProgress(0.5f, 0f, 0f);
         lastPhaseTitle = "";
         progressCard.setVisibility(View.VISIBLE);
-        page.post(new Runnable() {
-            @Override
-            public void run() {
-                page.smoothScrollTo(0, progressCard.getTop() - dp(12));
-            }
-        });
-        log("Gioco:  " + name);
-        log("Output: " + outDir);
+    }
 
-        // 1) percorso diretto, se ricavabile; 2) altrimenti il descrittore di file aperto da questa app
-        File direct = resolveGamePath(uri);
-        ParcelFileDescriptor pfd = null;
-        final File input;
-        try {
-            if (direct != null) {
-                input = direct;
-                log("Leggo il gioco da: " + direct);
-            } else {
-                pfd = getContentResolver().openFileDescriptor(uri, "r");
-                if (pfd == null) {
-                    throw new Exception("Il selettore non ha restituito il file");
-                }
-                input = new File("/proc/" + android.os.Process.myPid() + "/fd/" + pfd.getFd());
-                log("Percorso non ricavabile: leggo il gioco tramite descrittore di file.");
-            }
-        } catch (Exception e) {
-            logError("Impossibile aprire il gioco", e);
+    private final RunHub.Listener hubListener = new RunHub.Listener() {
+        @Override
+        public void onLine(String s) {
+            appendLog(s);
+        }
+
+        @Override
+        public void onFiles(long n) {
+            tvCount.setText(String.valueOf(n));
+        }
+
+        @Override
+        public void onProgress(ProgressModel.Snapshot s) {
+            showProgress(s);
+        }
+
+        @Override
+        public void onFinished(int status) {
+            syncFromHub();
+        }
+    };
+
+    /** Ridisegna tutto dallo stato condiviso: serve alla riapertura dell'app mentre il servizio lavora. */
+    private void syncFromHub() {
+        RunHub hub = RunHub.get();
+        int st = hub.status();
+        if (st == RunHub.IDLE) {
+            setRunning(false);
             return;
         }
-
-        // aggiornamento, se scelto: stessa logica
-        File updInput = null;
-        ParcelFileDescriptor updPfd = null;
-        if (updUri != null) {
-            log("Update: " + updName);
-            try {
-                File ud = resolveGamePath(updUri);
-                if (ud != null) {
-                    updInput = ud;
-                    log("Leggo l'update da: " + ud);
-                } else {
-                    updPfd = getContentResolver().openFileDescriptor(updUri, "r");
-                    if (updPfd == null) {
-                        throw new Exception("Il selettore non ha restituito il file dell'update");
-                    }
-                    updInput = new File("/proc/" + android.os.Process.myPid() + "/fd/" + updPfd.getFd());
-                    log("Percorso dell'update non ricavabile: lo leggo tramite descrittore di file.");
-                }
-            } catch (Exception e) {
-                if (pfd != null) {
-                    try {
-                        pfd.close();
-                    } catch (Exception ignored) {
-                        // niente da fare
-                    }
-                }
-                logError("Impossibile aprire l'update", e);
-                return;
-            }
-        }
-        final File updFile = updInput;
-        final ParcelFileDescriptor holdUpd = updPfd;
-        log("Non chiudere l'app finche' non finisce.");
-        final ParcelFileDescriptor holdPfd = pfd;
-
-        extractor = new Extractor(hactool, keysFile, getFilesDir(), new Extractor.Log() {
-            @Override
-            public void line(final String s) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        log(s);
-                    }
-                });
-            }
-
-            @Override
-            public void files(final long n) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        tvCount.setText(String.valueOf(n));
-                    }
-                });
-            }
-
-            @Override
-            public void progress(final ProgressModel.Snapshot snap) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        showProgress(snap);
-                    }
-                });
-            }
-        });
-
-        setRunning(true);
-        final Extractor ex = extractor;
-        worker = new Thread(new Runnable() {
+        tvLog.setText(hub.logText());
+        logScroll.post(new Runnable() {
             @Override
             public void run() {
-                Extractor.Result res = null;
-                Throwable err = null;
-                try {
-                    res = ex.run(input, name, updFile, outDir, overwrite);
-                } catch (InterruptedException ie) {
-                    err = ie;
-                } catch (Throwable e) {
-                    err = e;
-                } finally {
-                    if (holdUpd != null) {
-                        try {
-                            holdUpd.close();
-                        } catch (Exception ignored) {
-                            // niente da fare
-                        }
-                    }
-                    if (holdPfd != null) {
-                        try {
-                            holdPfd.close();
-                        } catch (Exception ignored) {
-                            // niente da fare
-                        }
-                    }
-                }
-                final Extractor.Result fres = res;
-                final Throwable ferr = err;
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        setRunning(false);
-                        if (ferr instanceof InterruptedException) {
-                            log("");
-                            log("Operazione annullata.");
-                            tvPhase.setText("Annullata");
-                        } else if (ferr != null) {
-                            log("");
-                            logError("Estrazione fallita", ferr);
-                            tvPhase.setText("Non riuscita");
-                        } else {
-                            log("");
-                            log("Fatto.");
-                            tvPhase.setText("Finito");
-                            tvPct.setText("100%");
-                            bar.setProgress(0.5f, 1f, 1f);
-                            tvEta.setText("0 s");
-                            log("romfs: " + fres.romfsFiles + " file in " + fres.romfs);
-                            log("exefs: " + fres.exefsFiles + " file in " + fres.exefs);
-                        }
-                    }
-                });
+                logScroll.fullScroll(View.FOCUS_DOWN);
             }
-        }, "extract");
-        worker.start();
+        });
+        resetProgressUi();
+        tvCount.setText(String.valueOf(hub.files()));
+        setRunning(st == RunHub.RUNNING);
+        ProgressModel.Snapshot last = hub.last();
+        if (last != null) {
+            showProgress(last);
+        }
+        if (st == RunHub.DONE) {
+            tvPhase.setText("Finito");
+            tvPct.setText("100%");
+            bar.setProgress(last != null ? last.share1 : 0.5f, 1f, 1f);
+            tvEta.setText("0 s");
+            tvDetail.setText(hub.summary());
+        } else if (st == RunHub.FAILED) {
+            tvPhase.setText("Non riuscita");
+        } else if (st == RunHub.CANCELLED) {
+            tvPhase.setText("Annullata");
+        }
     }
 
     private void setRunning(boolean r) {
         running = r;
         btnCancel.setVisibility(r ? View.VISIBLE : View.GONE);
         updateSteps();
-        if (r) {
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            acquireWakeLock();
-        } else {
-            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            releaseWakeLock();
-        }
     }
 
     private void showProgress(ProgressModel.Snapshot s) {
@@ -1016,20 +914,7 @@ public class MainActivity extends Activity {
             return; // l'ultimo messaggio puo' arrivare dopo la fine: il riepilogo e' gia' scritto
         }
         tvPct.setText(Math.min(100, (int) (s.overall * 100)) + "%");
-        String title;
-        switch (s.phase) {
-            case ProgressModel.PACKAGE:
-                title = "Estraggo i dati dal pacchetto";
-                break;
-            case ProgressModel.ANALYSIS:
-                title = "Cerco il programma principale";
-                break;
-            case ProgressModel.EXTRACT:
-                title = "Decifro romfs ed exefs";
-                break;
-            default:
-                title = "Finito";
-        }
+        String title = RunService.phaseTitle(s.phase);
         if (!title.equals(lastPhaseTitle)) {
             lastPhaseTitle = title;
             tvPhase.setText(title);
@@ -1042,21 +927,5 @@ public class MainActivity extends Activity {
             detail += "  " + Fmt.speed(s.speedBps);
         }
         tvDetail.setText(detail);
-    }
-
-    private void acquireWakeLock() {
-        if (wakeLock == null) {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "switchextractor:run");
-        }
-        if (!wakeLock.isHeld()) {
-            wakeLock.acquire(6L * 60L * 60L * 1000L);
-        }
-    }
-
-    private void releaseWakeLock() {
-        if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
-        }
     }
 }
