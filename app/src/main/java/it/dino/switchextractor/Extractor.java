@@ -186,32 +186,36 @@ public class Extractor {
             setPhase(ProgressModel.ANALYSIS);
             log.line("[" + (n - 1) + "/" + n + "] Cerco l'NCA principale (tipo Program)"
                     + (update != null ? ", nel base e nell'update" : "") + "...");
-            NcaInfo program = findProgramNca(baseDir);
+            NcaInfo program = findProgramNca(baseDir, soleKey(titleKeys), false);
             NcaInfo patch = null;
             if (update != null) {
                 if (program.titleId != null && program.titleId.endsWith("800")) {
                     throw new Exception("Il file scelto come gioco contiene solo un update (Title ID "
                             + program.titleId + "), non il gioco base. Scegli l'XCI/NSP del gioco base.");
                 }
-                patch = findProgramNca(updDir);
-                if (patch.titleId == null || !patch.titleId.endsWith("800")) {
+                patch = findProgramNca(updDir, soleKey(updKeys), true);
+                if (patch.titleId != null && !patch.titleId.endsWith("800")) {
                     throw new Exception("L'NSP scelto come update non contiene un aggiornamento (Title ID "
                             + patch.titleId + "): di solito finisce con 800.");
                 }
-                if (program.titleId != null && program.titleId.length() == patch.titleId.length()
+                if (program.titleId != null && patch.titleId != null && program.titleId.length() == patch.titleId.length()
                         && !program.titleId.substring(0, program.titleId.length() - 3)
                         .equals(patch.titleId.substring(0, patch.titleId.length() - 3))) {
                     throw new Exception("L'update non e' di questo gioco: base " + program.titleId
                             + ", update " + patch.titleId + ".");
                 }
-                log.line("Update compatibile: base " + program.titleId + ", update " + patch.titleId);
+                log.line(patch.titleId != null
+                        ? "Update compatibile: base " + program.titleId + ", update " + patch.titleId
+                        : "Compatibilita' dell'update non verificabile in anticipo: ci pensa hactool durante la patch.");
             }
 
             // titlekey per l'NCA che si estrae davvero (l'update, se c'e')
             NcaInfo target = patch != null ? patch : program;
             Map<String, String> targetKeys = patch != null ? updKeys : titleKeys;
             String titleKey = null;
-            if (target.rightsId != null) {
+            if (target.rightsId == null && patch != null) {
+                titleKey = soleKey(targetKeys);
+            } else if (target.rightsId != null) {
                 titleKey = targetKeys.get(target.rightsId);
                 if (titleKey == null && (nsp || patch != null)) {
                     throw new Exception("L'NCA principale e' cifrato con titlekey (rights id "
@@ -323,7 +327,12 @@ public class Extractor {
         }
     }
 
-    private NcaInfo findProgramNca(File dir) throws Exception {
+    /** La titlekey dell'unico ticket del pacchetto (di solito ce n'e' uno), o null. */
+    private static String soleKey(Map<String, String> keys) {
+        return keys.size() == 1 ? keys.values().iterator().next() : null;
+    }
+
+    private NcaInfo findProgramNca(File dir, String cliTitleKey, boolean fallbackLargest) throws Exception {
         File[] ncas = dir.listFiles();
         List<File> list = new ArrayList<File>();
         if (ncas != null) {
@@ -343,7 +352,10 @@ public class Extractor {
         NcaInfo any = null;
         boolean sawUpdate = false;
         for (File f : arr) {
-            Out o = exec(args("-t", "nca", f.getAbsolutePath()), false);
+            // senza la titlekey hactool puo' non riuscire a leggere un NCA di update (BKTR) e non stampa nulla
+            Out o = cliTitleKey != null
+                    ? exec(args("--titlekey=" + cliTitleKey, "-t", "nca", f.getAbsolutePath()), false)
+                    : exec(args("-t", "nca", f.getAbsolutePath()), false);
             NcaInfo info = new NcaInfo();
             info.file = f;
             for (String l : o.lines) {
@@ -357,6 +369,9 @@ public class Extractor {
             }
             log.line("  " + f.getName() + " -> " + (info.type == null ? "illeggibile" : info.type)
                     + " (" + human(f.length()) + ")");
+            if (info.type == null && f.length() > (1 << 20)) {
+                log.line("    hactool (codice " + o.code + "): " + tail(o.lines, 3).replace("\n", " | "));
+            }
             if ("Program".equals(info.type)) {
                 if (any == null) {
                     any = info;
@@ -370,6 +385,15 @@ public class Extractor {
             }
         }
         NcaInfo pick = base != null ? base : any;
+        if (pick == null && fallbackLargest) {
+            // in un NSP di update l'NCA piu' grande e' sempre il Program: se hactool non lo legge da solo
+            // proviamo comunque a usarlo (l'estrazione vera dira' se la titlekey e' quella giusta)
+            NcaInfo big = new NcaInfo();
+            big.file = arr[0];
+            log.line("Nota: non riesco a leggere l'intestazione dell'NCA piu' grande; lo uso comunque come Program dell'update: "
+                    + big.file.getName());
+            return big;
+        }
         if (pick == null) {
             throw new Exception("Nessun NCA di tipo Program leggibile. Di solito vuol dire che prod.keys e' "
                     + "troppo vecchia per questo gioco (ridumpala con una Lockpick_RCM recente).");
