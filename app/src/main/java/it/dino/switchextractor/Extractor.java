@@ -389,6 +389,10 @@ public class Extractor {
      * poi il corpo: issuer 0x40, blocco titlekey 0x100, ... tipo titlekey a +0x141,
      * rights id a +0x160.
      */
+    private static boolean knownSig(long sig) {
+        return sig >= 0x010000L && sig <= 0x010005L;
+    }
+
     static Ticket parseTicket(File f) throws IOException {
         byte[] b = new byte[(int) Math.min(f.length(), 0x10000)];
         FileInputStream in = new FileInputStream(f);
@@ -407,7 +411,14 @@ public class Extractor {
         if (b.length < 8) {
             throw new IOException("Ticket troppo corto: " + f.getName());
         }
-        long sig = ((b[0] & 0xFFL) << 24) | ((b[1] & 0xFFL) << 16) | ((b[2] & 0xFFL) << 8) | (b[3] & 0xFFL);
+        // nei ticket veri il tipo di firma e' little endian (04 00 01 00 = 0x010004)
+        long sig = (b[0] & 0xFFL) | ((b[1] & 0xFFL) << 8) | ((b[2] & 0xFFL) << 16) | ((b[3] & 0xFFL) << 24);
+        if (!knownSig(sig)) {
+            long be = ((b[0] & 0xFFL) << 24) | ((b[1] & 0xFFL) << 16) | ((b[2] & 0xFFL) << 8) | (b[3] & 0xFFL);
+            if (knownSig(be)) {
+                sig = be; // solo per ticket fabbricati con l'altro ordine
+            }
+        }
         int sigSize;
         int pad;
         if (sig == 0x010000L || sig == 0x010003L) {
