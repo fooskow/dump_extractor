@@ -38,6 +38,11 @@ git remote add origin https://github.com/SciresM/hactool.git
 git fetch -q --depth 1 origin "$HACTOOL_SHA"
 git checkout -q FETCH_HEAD
 
+# bionic (libc di Android) ha FILE opaco: l'aritmetica sui puntatori di hactool (main.c, --basefake)
+# non compila. Il valore serve solo come sentinella "non NULL" e viene rimesso a NULL prima di fclose.
+grep -q 'nca_ctx.tool_ctx->base_file++;' main.c || { echo "ERRORE: patch bionic non applicabile (main.c cambiato?)" >&2; exit 1; }
+sed -i 's/nca_ctx\.tool_ctx->base_file++;/nca_ctx.tool_ctx->base_file = (FILE *)1;/' main.c
+
 cat > config.mk <<EOF
 CC = $CC
 AR = $AR
