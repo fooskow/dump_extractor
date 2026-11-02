@@ -137,6 +137,43 @@ if "#include <string.h>" not in src:
 open("nca.c", "w").write(src)
 PYEOF
 
+# hactool sposta i blocchi delle tabelle BKTR "in avanti" con memcpy su zone sovrapposte (comportamento
+# non definito in C). Con glibc funziona per caso; con bionic (Android) i blocchi dopo il primo possono
+# uscire corrotti e le posizioni alte del RomFS puntano nel posto sbagliato. memmove e' quella giusta.
+# In piu' verifica la tabella di rilocazione appena caricata e stampa il risultato ("[DIAG] ...").
+python3 - <<'PYEOF'
+import sys
+src = open("nca.c").read()
+o1 = "            memcpy(bktr_get_relocation_bucket(ctx->bktr_ctx.relocation_block, i), &ctx->bktr_ctx.relocation_block->buckets[i], sizeof(bktr_relocation_bucket_t));"
+o2 = "            memcpy(bktr_get_subsection_bucket(ctx->bktr_ctx.subsection_block, i), &ctx->bktr_ctx.subsection_block->buckets[i], sizeof(bktr_subsection_bucket_t));"
+o3 = "        last_subsec_bucket->entries[last_subsec_bucket->num_entries + 1].ctr_val = 0;\n"
+n3 = o3 + """        {
+            bktr_relocation_block_t *rb = ctx->bktr_ctx.relocation_block;
+            uint64_t prev = 0, n = 0, bad_order = 0, bad_patch = 0, n_patch = 0;
+            uint64_t patch_limit = ctx->bktr_ctx.subsection_block->total_size;
+            for (uint32_t b = 0; b < rb->num_buckets; b++) {
+                bktr_relocation_bucket_t *bk = bktr_get_relocation_bucket(rb, b);
+                for (uint32_t e = 0; e < bk->num_entries; e++) {
+                    bktr_relocation_entry_t *en = &bk->entries[e];
+                    if (n > 0 && en->virt_offset < prev) bad_order++;
+                    prev = en->virt_offset;
+                    if (en->is_patch) { n_patch++; if (en->phys_offset > patch_limit) bad_patch++; }
+                    n++;
+                }
+            }
+            printf("[DIAG] rilocazione: %u blocchi, %"PRIu64" voci (%"PRIu64" dall'update), fuori ordine %"PRIu64", fuori dall'update %"PRIu64"\\n",
+                   rb->num_buckets, n, n_patch, bad_order, bad_patch);
+        }
+"""
+for o in (o1, o2, o3):
+    if src.count(o) != 1:
+        sys.exit("ERRORE: patch memmove non applicabile: " + o[:50])
+src = src.replace(o1, o1.replace("memcpy(", "memmove("))
+src = src.replace(o2, o2.replace("memcpy(", "memmove("))
+src = src.replace(o3, n3)
+open("nca.c", "w").write(src)
+PYEOF
+
 # hactool termina subito (exit) se una chiave che conosce ha la lunghezza sbagliata: nelle prod.keys
 # reali capita (es. una riga con un byte in piu'). Per le chiavi lette da file la ignoriamo (resta a
 # zero) invece di chiudere il programma; da riga di comando (--titlekey) il comportamento non cambia.
