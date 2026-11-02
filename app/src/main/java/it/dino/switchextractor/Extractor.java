@@ -189,15 +189,7 @@ public class Extractor {
             NcaInfo program = findProgramNca(baseDir, soleKey(titleKeys), false);
             NcaInfo patch = null;
             if (update != null) {
-                if (program.titleId != null && program.titleId.endsWith("800")) {
-                    throw new Exception("Il file scelto come gioco contiene solo un update (Title ID "
-                            + program.titleId + "), non il gioco base. Scegli l'XCI/NSP del gioco base.");
-                }
                 patch = findProgramNca(updDir, soleKey(updKeys), true);
-                if (patch.titleId != null && !patch.titleId.endsWith("800")) {
-                    throw new Exception("L'NSP scelto come update non contiene un aggiornamento (Title ID "
-                            + patch.titleId + "): di solito finisce con 800.");
-                }
                 if (program.titleId != null && patch.titleId != null && program.titleId.length() == patch.titleId.length()
                         && !program.titleId.substring(0, program.titleId.length() - 3)
                         .equals(patch.titleId.substring(0, patch.titleId.length() - 3))) {
