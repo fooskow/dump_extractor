@@ -22,6 +22,10 @@ public class Extractor {
         void line(String s);
 
         void files(long n);
+
+        /** Avanzamento misurato: percentuale, velocita', tempo stimato. Chiamato ogni ~400 ms. */
+        default void progress(ProgressModel.Snapshot s) {
+        }
     }
 
     public static class Result {
@@ -56,6 +60,15 @@ public class Extractor {
     private final Log log;
     private volatile Process current;
     private volatile boolean cancelled;
+
+    // avanzamento
+    private volatile ProgressModel model;
+    private volatile int phaseNow = ProgressModel.PACKAGE;
+    private volatile File watchDir;
+    private volatile long p3Done;
+    private volatile File p3Current;
+    private volatile boolean tickerOn;
+    private Thread ticker;
 
     public Extractor(File hactool, File keys, File homeDir, Log log) {
         this.hactool = hactool;
@@ -125,6 +138,17 @@ public class Extractor {
                     + ". Serve piu' o meno il doppio del gioco (NCA temporanei + estratti).");
         }
 
+        // quanto lavoro c'e' da fare, letto dalle tabelle del pacchetto (stima se non riesce)
+        PackageInfo info = PackageInfo.read(input, xci);
+        long w1 = info != null ? info.ncaBytes : input.length();
+        long w3 = info != null ? info.largestNca : (long) (w1 * 0.97);
+        model = new ProgressModel(w1, w3, System.nanoTime());
+        phaseNow = ProgressModel.PACKAGE;
+        watchDir = tmp;
+        p3Done = 0;
+        p3Current = null;
+        startTicker();
+
         try {
             Map<String, String> titleKeys = new HashMap<String, String>();
 
@@ -159,6 +183,7 @@ public class Extractor {
                 }
             }
 
+            setPhase(ProgressModel.ANALYSIS);
             log.line("[2/3] Cerco l'NCA principale (tipo Program)...");
             NcaInfo program = findProgramNca(tmp);
             String titleKey = null;
@@ -170,6 +195,9 @@ public class Extractor {
                 }
             }
 
+            p3Done = 0;
+            p3Current = null;
+            setPhase(ProgressModel.EXTRACT);
             log.line("[3/3] Estraggo romfs ed exefs da " + program.file.getName() + " ...");
             List<String> a = new ArrayList<String>();
             if (titleKey != null) {
@@ -196,8 +224,11 @@ public class Extractor {
                     throw new Exception("Titlekey non trovata per questo NCA: i file estratti sarebbero illeggibili.");
                 }
             }
+            model.finish(System.nanoTime());
+            emit();
             return r;
         } finally {
+            stopTicker();
             deleteRecursive(tmp);
         }
     }
@@ -350,6 +381,9 @@ public class Extractor {
                 while ((line = r.readLine()) != null) {
                     if (line.startsWith("Saving ")) {
                         saved++;
+                        if (countSaving) {
+                            onSaving(SavingLine.path(line));
+                        }
                         if (countSaving && saved % 25 == 0) {
                             log.files(saved);
                         }
@@ -372,6 +406,94 @@ public class Extractor {
             log.files(saved);
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------
+    // Avanzamento
+    // ------------------------------------------------------------------
+
+    private void setPhase(int p) {
+        ProgressModel m = model;
+        if (m != null) {
+            m.setPhase(p, System.nanoTime());
+        }
+        phaseNow = p;
+        emit();
+    }
+
+    /** hactool stampa "Saving ..." prima di scrivere ogni file: quello precedente e' quindi completo. */
+    private void onSaving(String path) {
+        File prev = p3Current;
+        if (prev != null) {
+            p3Done += prev.length();
+        }
+        p3Current = path == null ? null : new File(path);
+    }
+
+    private void emit() {
+        ProgressModel m = model;
+        if (m != null) {
+            try {
+                log.progress(m.snapshot(System.nanoTime()));
+            } catch (RuntimeException ignored) {
+                // l'interfaccia non deve poter fermare l'estrazione
+            }
+        }
+    }
+
+    private void startTicker() {
+        tickerOn = true;
+        ticker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (tickerOn) {
+                    ProgressModel m = model;
+                    if (m != null) {
+                        long now = System.nanoTime();
+                        int ph = phaseNow;
+                        if (ph == ProgressModel.PACKAGE) {
+                            m.update(dirBytes(watchDir), now);
+                        } else if (ph == ProgressModel.EXTRACT) {
+                            File c = p3Current;
+                            m.update(p3Done + (c != null ? c.length() : 0), now);
+                        }
+                        emit();
+                    }
+                    try {
+                        Thread.sleep(400);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            }
+        }, "progress");
+        ticker.setDaemon(true);
+        ticker.start();
+    }
+
+    private void stopTicker() {
+        tickerOn = false;
+        Thread t = ticker;
+        if (t != null) {
+            t.interrupt();
+            try {
+                t.join(1000);
+            } catch (InterruptedException ignored) {
+                // si esce comunque
+            }
+        }
+    }
+
+    /** Somma dei file direttamente dentro la cartella (gli NCA estratti dal pacchetto). */
+    private static long dirBytes(File dir) {
+        File[] kids = dir == null ? null : dir.listFiles();
+        long n = 0;
+        if (kids != null) {
+            for (File k : kids) {
+                n += k.length();
+            }
+        }
+        return n;
     }
 
     private static String tail(List<String> lines, int n) {
@@ -439,13 +561,6 @@ public class Extractor {
     }
 
     public static String human(long bytes) {
-        double v = bytes;
-        String[] u = {"B", "KB", "MB", "GB", "TB"};
-        int i = 0;
-        while (v >= 1024 && i < u.length - 1) {
-            v /= 1024;
-            i++;
-        }
-        return String.format(Locale.ROOT, i == 0 ? "%.0f %s" : "%.1f %s", v, u[i]);
+        return Fmt.bytes(bytes);
     }
 }

@@ -43,6 +43,12 @@ git checkout -q FETCH_HEAD
 grep -q 'nca_ctx.tool_ctx->base_file++;' main.c || { echo "ERRORE: patch bionic non applicabile (main.c cambiato?)" >&2; exit 1; }
 sed -i 's/nca_ctx\.tool_ctx->base_file++;/nca_ctx.tool_ctx->base_file = (FILE *)1;/' main.c
 
+# Quando stdout e' una pipe, la libc lo bufferizza a blocchi: le righe "Saving ..." arriverebbero
+# a raffiche e la barra di avanzamento scatterebbe. Con il buffer per riga arrivano subito.
+grep -q 'hactool_ctx_t base_ctx; /\* Context for base NCA, if used. \*/' main.c || { echo "ERRORE: patch setvbuf non applicabile (main.c cambiato?)" >&2; exit 1; }
+sed -i 's|^\(    hactool_ctx_t base_ctx; /\* Context for base NCA, if used. \*/\)$|\1\n    setvbuf(stdout, NULL, _IOLBF, 0);|' main.c
+grep -q 'setvbuf(stdout, NULL, _IOLBF, 0);' main.c || { echo "ERRORE: patch setvbuf non applicata" >&2; exit 1; }
+
 # hactool termina subito (exit) se una chiave che conosce ha la lunghezza sbagliata: nelle prod.keys
 # reali capita (es. una riga con un byte in piu'). Per le chiavi lette da file la ignoriamo (resta a
 # zero) invece di chiudere il programma; da riga di comando (--titlekey) il comportamento non cambia.

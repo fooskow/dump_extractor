@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- cartella aperta con freccia che esce: "estrai" -->
+    <path
+        android:fillColor="#F2B84B"
+        android:pathData="M30,40 L30,72 Q30,76 34,76 L74,76 Q78,76 78,72 L78,46 Q78,42 74,42 L56,42 L50,35 L34,35 Q30,35 30,40 Z" />
+    <path
+        android:fillColor="#1B2024"
+        android:pathData="M54,70 L54,52 L47,59 L44,56 L56,44 L68,56 L65,59 L58,52 L58,70 Z" />
+</vector>

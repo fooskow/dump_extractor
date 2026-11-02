@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ground">#1B2024</color>
+    <color name="surface">#232A30</color>
+    <color name="line">#38424A</color>
+    <color name="well">#14181B</color>
+    <color name="track">#2C353C</color>
+    <color name="ink">#ECEFF1</color>
+    <color name="ink2">#A9B4BC</color>
+    <color name="ink3">#87939D</color>
+    <color name="pin">#F2B84B</color>
+    <color name="onpin">#241A04</color>
+    <color name="pintext">#F2B84B</color>
+    <color name="data">#53D6B8</color>
+    <color name="ondata">#06231C</color>
+    <color name="fault">#FF8272</color>
+</resources>
